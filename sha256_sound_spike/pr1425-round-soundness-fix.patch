@@ -1,0 +1,30 @@
+diff --git a/stwo_cairo_prover/crates/cairo-air/src/components/sha_256_round.rs b/stwo_cairo_prover/crates/cairo-air/src/components/sha_256_round.rs
+index 78bfb424..d30a47a2 100644
+--- a/stwo_cairo_prover/crates/cairo-air/src/components/sha_256_round.rs
++++ b/stwo_cairo_prover/crates/cairo-air/src/components/sha_256_round.rs
+@@ -399,6 +399,13 @@ impl FrameworkEval for Eval {
+         eval.add_constraint(
+             (chh_col77.clone() - (xor_col74.clone() + (xor_col75.clone() * M31_256.clone()))),
+         );
++        // SOUNDNESS FIX (bitcoin-stark): bind the Ch limbs actually consumed by the T1
++        // TripleSum32 (ch_limb_0/1) to the recombined, XOR-checked Ch halves (chl/chh).
++        // Without these, cols 78/79 are free trace cells that never link to chl/chh, so a
++        // prover can substitute an arbitrary Ch and forge the round output. See
++        // SHA256-SOUNDNESS-FIX.md.
++        eval.add_constraint((ch_limb_0_col78.clone() - chl_col76.clone()));
++        eval.add_constraint((ch_limb_1_col79.clone() - chh_col77.clone()));
+         eval.add_to_relation(RelationEntry::new(
+             &self.sha_256_k_table_lookup_elements,
+             E::EF::one(),
+@@ -623,6 +630,11 @@ impl FrameworkEval for Eval {
+         eval.add_constraint(
+             (majh_col113.clone() - (xor_col110.clone() + (xor_col111.clone() * M31_256.clone()))),
+         );
++        // SOUNDNESS FIX (bitcoin-stark): bind the Maj limbs actually consumed by the T2
++        // TripleSum32 (maj_limb_0/1) to the recombined, XOR-checked Maj halves (majl/majh).
++        // Symmetric to the Ch fix above. See SHA256-SOUNDNESS-FIX.md.
++        eval.add_constraint((maj_limb_0_col114.clone() - majl_col112.clone()));
++        eval.add_constraint((maj_limb_1_col115.clone() - majh_col113.clone()));
+         TripleSum32::evaluate(
+             [
+                 sha_256_big_sigma_0_output_limb_0_col52.clone(),

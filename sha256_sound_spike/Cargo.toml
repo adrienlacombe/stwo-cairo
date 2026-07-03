@@ -1,0 +1,34 @@
+# SHA256 round-AIR sound-port spike — a standalone re-port of the round component from
+# StarkWare stwo-cairo PR #1425 ("sha256 builtin") WITH the Ch/Maj under-constraint fixed.
+#
+# SOUNDNESS-CRITICAL SPIKE — NOT WIRED INTO ANY PRODUCTION PATH.
+# Purpose: prove, against THIS repo's current stwo pin (rev 5ea05973, matching
+# stwo_cairo_prover/Cargo.toml), that the four Ch/Maj binding constraints are (a) necessary —
+# without them a consistent Ch forgery is ACCEPTED — and (b) sufficient — with them the same
+# forgery is REJECTED while both FIPS-180-4 KATs still pass. See SHA256-SOUNDNESS-FIX.md.
+#
+# It keeps PR #1425's per-relation lookup-element convention so the ported eval stays
+# line-comparable with the upstream round component; a full main-integrated port (single
+# CommonLookupElements bus, whole component tower, VM builtin) is out of scope (see the doc).
+#
+# Requires supervised human + StarkWare review before any of this is merged anywhere.
+
+[package]
+name = "sha256-round-sound-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace: must NOT join the stwo_cairo_prover workspace.
+[workspace]
+
+[dependencies]
+# Pinned to this repo's stwo rev (stwo_cairo_prover/Cargo.toml @ 5ea05973).
+stwo = { git = "https://github.com/starkware-libs/stwo", rev = "5ea05973", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo", rev = "5ea05973", features = ["prover"] }
+num-traits = "0.2.17"
+itertools = "0.12.0"
+serde = { version = "1.0", features = ["derive"] }
+
+[profile.dev]
+opt-level = 1
