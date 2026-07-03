@@ -14,8 +14,8 @@ use sha256_round_sound_spike::check::{check_constraints_on_trace, Violation};
 use sha256_round_sound_spike::components::sha_256_round::{Claim, Eval};
 use sha256_round_sound_spike::reference;
 use sha256_round_sound_spike::witness::{
-    as_tree, build_interaction_trace, build_round_trace, forge_ch, CompressionInput,
-    RoundRelations, RoundTrace,
+    as_tree, build_interaction_trace, build_round_trace, build_round_trace_forge, forge_ch, Forge,
+    CompressionInput, RoundRelations, RoundTrace,
 };
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::FrameworkEval;
@@ -208,14 +208,20 @@ fn corrupted_and_byte_stale_interaction_rejected() {
     assert!(violations.iter().any(|v| v.row == 9));
 }
 
-/// UPSTREAM SOUNDNESS FLAG (see component header, deviation 3): a consistent Ch forgery —
-/// overwrite the unconstrained ch_limb columns, recompute the whole downstream row, rebuild
-/// the interaction trace — is ACCEPTED by the verbatim decoded component even though the
-/// resulting round output is NOT the SHA-256 round function. The spike's binding
-/// constraints reject the same trace. This must be checked against the real upstream PR
-/// #1425 diff during sign-off (the decode may have dropped the binding constraints).
+/// UPSTREAM SOUNDNESS FLAG (see component header, deviation 3) — ROW-LOCAL demonstration.
+/// A consistent single-row Ch forgery (overwrite the unconstrained ch_limb columns,
+/// recompute that row, rebuild the interaction trace) is ACCEPTED by the verbatim decoded
+/// component and rejected only with the binding constraints.
+///
+/// SCOPE CAVEAT (per adversarial review): this is a per-component (`assert_constraints_on_trace`)
+/// verdict, not a full-AIR verdict. Corrupting ONE row leaves the round self-relation's
+/// PUSH(row+1)/PULL(row) disagreeing at that boundary; in the full multi-component AIR the
+/// round relation's global multiplicity balance would itself reject this specific trace, even
+/// WITHOUT the binding fix. The end-to-end exploit that the fix is genuinely required to stop
+/// is the PROPAGATED forgery — see `propagated_*_forgery_*` below. (Same "only caught
+/// globally" character as `corrupted_and_byte_stale_interaction_rejected`.)
 #[test]
-fn forged_ch_demonstrates_underconstraint_and_binding_fix() {
+fn forged_ch_row_local_underconstraint_and_binding_fix() {
     let mut trace = abc_trace();
 
     // Forge Ch at row 10 to a value that changes the digest.
@@ -252,4 +258,88 @@ fn forged_ch_demonstrates_underconstraint_and_binding_fix() {
         "consistent Ch forgery with binding constraints on was ACCEPTED"
     );
     assert!(bound_violations.iter().any(|v| v.row == 10));
+}
+
+/// END-TO-END exploit: a PROPAGATED Ch forgery. Forge Ch at round 10, then carry the
+/// corrupted state honestly through rounds 11..63 so the round self-relation chains
+/// consistently across every row. Now BOTH the row-local constraints AND the round chain
+/// hold, so the verbatim decoded component accepts a trace whose final digest is not
+/// SHA-256 — the full-AIR-relevant attack the binding fix is genuinely required to stop
+/// (the global round-relation balance does NOT catch it; the chain is consistent). The
+/// binding constraints reject it at the forged row.
+#[test]
+fn propagated_ch_forgery_accepted_without_binding_rejected_with() {
+    let input = CompressionInput {
+        h_in: reference::IV,
+        block: abc_block(),
+    };
+    let forge_t = 10;
+
+    let honest = build_round_trace(&[input]);
+    let honest_ch = honest.cols[78][forge_t].0 | (honest.cols[79][forge_t].0 << 16);
+    let forged_ch = honest_ch ^ 0xdead_beef;
+
+    let trace = build_round_trace_forge(&[input], 0, forge_t, Forge::Ch(forged_ch));
+
+    // The propagated chain yields a genuinely wrong post-64-round state (digest forgery),
+    // not just a single corrupted row.
+    assert_ne!(
+        trace.final_states[0], honest.final_states[0],
+        "propagated forgery should change the final state"
+    );
+
+    // Verbatim decoded component (bind = false): ACCEPTS the wrong-digest trace. This is the
+    // end-to-end soundness hole.
+    let verbatim = check(&trace, false);
+    assert!(
+        verbatim.is_empty(),
+        "verbatim component must ACCEPT the propagated forgery (row-local constraints and \
+         the round chain all hold): {verbatim:?}"
+    );
+
+    // Binding fix (bind = true): REJECTS, at the forged row (ch_limb != chl there; every
+    // other row is an honest computation on the forged state, so ch_limb == chl).
+    let bound = check(&trace, true);
+    assert!(!bound.is_empty(), "propagated Ch forgery was ACCEPTED with binding on");
+    assert!(bound.iter().any(|v| v.row == forge_t));
+    assert!(
+        bound.iter().all(|v| v.row == forge_t),
+        "only the forged row should violate the binding constraints: {bound:?}"
+    );
+}
+
+/// Maj counterpart of the propagated Ch exploit: proves the two `maj_limb` binding
+/// constraints are independently necessary (the Ch tests never exercise cols 114/115).
+#[test]
+fn propagated_maj_forgery_accepted_without_binding_rejected_with() {
+    let input = CompressionInput {
+        h_in: reference::IV,
+        block: abc_block(),
+    };
+    let forge_t = 10;
+
+    let honest = build_round_trace(&[input]);
+    let honest_maj = honest.cols[114][forge_t].0 | (honest.cols[115][forge_t].0 << 16);
+    let forged_maj = honest_maj ^ 0xdead_beef;
+
+    let trace = build_round_trace_forge(&[input], 0, forge_t, Forge::Maj(forged_maj));
+
+    assert_ne!(
+        trace.final_states[0], honest.final_states[0],
+        "propagated forgery should change the final state"
+    );
+
+    let verbatim = check(&trace, false);
+    assert!(
+        verbatim.is_empty(),
+        "verbatim component must ACCEPT the propagated Maj forgery: {verbatim:?}"
+    );
+
+    let bound = check(&trace, true);
+    assert!(!bound.is_empty(), "propagated Maj forgery was ACCEPTED with binding on");
+    assert!(bound.iter().any(|v| v.row == forge_t));
+    assert!(
+        bound.iter().all(|v| v.row == forge_t),
+        "only the forged row should violate the binding constraints: {bound:?}"
+    );
 }

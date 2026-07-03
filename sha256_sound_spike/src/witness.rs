@@ -375,6 +375,7 @@ pub fn base_trace_evals(
 /// Build the interaction trace (19 secure columns = 76 base columns) exactly as
 /// `finalize_logup_in_pairs` expects, plus the claimed sum, as committed SIMD circle
 /// evaluations (for the real prover pipeline).
+#[allow(clippy::needless_range_loop)] // `j` indexes the per-row batched-fraction vectors.
 pub fn build_interaction_evals(
     trace: &RoundTrace,
     rels: &RoundRelations,
@@ -442,34 +443,139 @@ pub fn as_tree<'a>(
     ])
 }
 
-/// TEST HELPER — forge the Ch value of one row the way a malicious prover would against
-/// the verbatim decoded component: overwrite the unconstrained ch_limb columns (78/79)
-/// and recompute every downstream column of that row consistently (T1 chain, new_e, new_a).
-/// All row-local constraints of the VERBATIM component remain satisfied; only the added
-/// `bind_ch_maj_limbs` constraints catch it.
-pub fn forge_ch(trace: &mut RoundTrace, row: usize, forged_ch: u32) {
-    let get = |cols: &[Vec<M31>], i: usize| cols[i][row].0;
-    let u32_of = |cols: &[Vec<M31>], lo: usize, hi: usize| get(cols, lo) | (get(cols, hi) << 16);
+#[inline]
+fn u32_at(cols: &[Vec<M31>], row: usize, lo: usize, hi: usize) -> u32 {
+    cols[lo][row].0 | (cols[hi][row].0 << 16)
+}
 
-    let h = u32_of(&trace.cols, 16, 17);
-    let bs1 = u32_of(&trace.cols, 50, 51);
-    let k = u32_of(&trace.cols, 80, 81);
-    let wt = u32_of(&trace.cols, 18, 19);
-    let d = u32_of(&trace.cols, 8, 9);
-    let t2 = u32_of(&trace.cols, 116, 117);
+/// Overwrite one row's Ch to `forged_ch`: set the unconstrained `ch_limb` columns (78/79)
+/// and recompute the row's downstream T1 chain / new_e / new_a. `chl`/`chh` (76/77) stay
+/// honest — the AND/XOR lookups pin them, so a real prover cannot touch them. Returns the
+/// forged post-round state `[a..h]` entering the NEXT round (ordering matches
+/// [`reference::round`]), for callers that propagate the corruption forward.
+fn overwrite_row_forged_ch(cols: &mut [Vec<M31>], row: usize, forged_ch: u32) -> [u32; 8] {
+    let a = u32_at(cols, row, 2, 3);
+    let b = u32_at(cols, row, 4, 5);
+    let c = u32_at(cols, row, 6, 7);
+    let d = u32_at(cols, row, 8, 9);
+    let e = u32_at(cols, row, 10, 11);
+    let f = u32_at(cols, row, 12, 13);
+    let g = u32_at(cols, row, 14, 15);
+    let h = u32_at(cols, row, 16, 17);
+    let bs1 = u32_at(cols, row, 50, 51);
+    let k = u32_at(cols, row, 80, 81);
+    let wt = u32_at(cols, row, 18, 19);
+    let t2 = u32_at(cols, row, 116, 117);
 
-    trace.cols[78][row] = m(lo16(forged_ch));
-    trace.cols[79][row] = m(hi16(forged_ch));
+    cols[78][row] = m(lo16(forged_ch));
+    cols[79][row] = m(hi16(forged_ch));
     let s1 = h.wrapping_add(bs1).wrapping_add(forged_ch);
-    trace.cols[82][row] = m(lo16(s1));
-    trace.cols[83][row] = m(hi16(s1));
+    cols[82][row] = m(lo16(s1));
+    cols[83][row] = m(hi16(s1));
     let t1 = s1.wrapping_add(k).wrapping_add(wt);
-    trace.cols[84][row] = m(lo16(t1));
-    trace.cols[85][row] = m(hi16(t1));
+    cols[84][row] = m(lo16(t1));
+    cols[85][row] = m(hi16(t1));
     let new_e = d.wrapping_add(t1);
-    trace.cols[120][row] = m(lo16(new_e));
-    trace.cols[121][row] = m(hi16(new_e));
+    cols[120][row] = m(lo16(new_e));
+    cols[121][row] = m(hi16(new_e));
     let new_a = t1.wrapping_add(t2);
-    trace.cols[122][row] = m(lo16(new_a));
-    trace.cols[123][row] = m(hi16(new_a));
+    cols[122][row] = m(lo16(new_a));
+    cols[123][row] = m(hi16(new_a));
+
+    [new_a, a, b, c, new_e, e, f, g]
+}
+
+/// Overwrite one row's Maj to `forged_maj`: set the unconstrained `maj_limb` columns
+/// (114/115) and recompute T2 (116/117) and new_a (122/123). `majl`/`majh` (112/113) stay
+/// honest (pinned by the AND/XOR lookups); `new_e`/T1 are unaffected (they depend only on
+/// Ch). Returns the forged post-round state `[a..h]`.
+fn overwrite_row_forged_maj(cols: &mut [Vec<M31>], row: usize, forged_maj: u32) -> [u32; 8] {
+    let a = u32_at(cols, row, 2, 3);
+    let b = u32_at(cols, row, 4, 5);
+    let c = u32_at(cols, row, 6, 7);
+    let e = u32_at(cols, row, 10, 11);
+    let f = u32_at(cols, row, 12, 13);
+    let g = u32_at(cols, row, 14, 15);
+    let bs0 = u32_at(cols, row, 52, 53);
+    let t1 = u32_at(cols, row, 84, 85);
+    let new_e = u32_at(cols, row, 120, 121);
+
+    cols[114][row] = m(lo16(forged_maj));
+    cols[115][row] = m(hi16(forged_maj));
+    let t2 = bs0.wrapping_add(forged_maj);
+    cols[116][row] = m(lo16(t2));
+    cols[117][row] = m(hi16(t2));
+    let new_a = t1.wrapping_add(t2);
+    cols[122][row] = m(lo16(new_a));
+    cols[123][row] = m(hi16(new_a));
+
+    [new_a, a, b, c, new_e, e, f, g]
+}
+
+/// TEST HELPER — forge the Ch value of a SINGLE row the way a malicious prover would against
+/// the verbatim decoded component: overwrite the unconstrained ch_limb columns (78/79) and
+/// recompute that row's downstream columns (T1 chain, new_e, new_a). All row-local
+/// constraints of the VERBATIM component remain satisfied; only the added
+/// `bind_ch_maj_limbs` constraints catch it AT THIS ROW.
+///
+/// NOTE: this corrupts one row WITHOUT updating the next row's input state, so it leaves the
+/// round self-relation's PUSH (row+1) / PULL (this row) disagreeing at the boundary — a
+/// residual the full multi-component AIR would itself reject via the round relation's global
+/// balance. For the end-to-end exploit that the binding fix is genuinely needed to stop, see
+/// [`build_round_trace_forge`] (a PROPAGATED forgery that keeps the round chain consistent).
+pub fn forge_ch(trace: &mut RoundTrace, row: usize, forged_ch: u32) {
+    let _ = overwrite_row_forged_ch(&mut trace.cols, row, forged_ch);
+}
+
+/// Which round-choice function to forge, and to what value, in [`build_round_trace_forge`].
+#[derive(Clone, Copy)]
+pub enum Forge {
+    Ch(u32),
+    Maj(u32),
+}
+
+/// TEST HELPER — build a trace with a PROPAGATED forgery: forge the Ch (or Maj) of round
+/// `forge_t` in compression `forge_seq`, then carry the corrupted state honestly through
+/// every remaining round so the round self-relation chains consistently across all rows.
+///
+/// This models the actual end-to-end exploit of the ch_limb/maj_limb under-constraint. Unlike
+/// [`forge_ch`] (single row → round-chain boundary residual the full AIR catches on its own),
+/// here EVERY row-local constraint AND the round self-chain hold, so the verbatim decoded
+/// component accepts a trace whose final digest is NOT SHA-256. Only the binding constraints
+/// reject it, at exactly the forged row. `final_states[forge_seq]` is the forged (wrong)
+/// post-64-round state.
+pub fn build_round_trace_forge(
+    inputs: &[CompressionInput],
+    forge_seq: usize,
+    forge_t: usize,
+    forge: Forge,
+) -> RoundTrace {
+    assert!(inputs.len().is_power_of_two(), "spike keeps every row enabled");
+    let n_rows = inputs.len() * 64;
+    let log_size = n_rows.ilog2();
+    let mut cols = vec![vec![M31::from(0); n_rows]; N_TRACE_COLUMNS];
+    let mut final_states = Vec::with_capacity(inputs.len());
+
+    for (seq, input) in inputs.iter().enumerate() {
+        let w = reference::message_schedule_80(&input.block);
+        let mut state = input.h_in;
+        for t in 0..64usize {
+            let row = seq * 64 + t;
+            fill_row(&mut cols, row, seq as u32, t as u32, state, &w);
+            state = if seq == forge_seq && t == forge_t {
+                match forge {
+                    Forge::Ch(v) => overwrite_row_forged_ch(&mut cols, row, v),
+                    Forge::Maj(v) => overwrite_row_forged_maj(&mut cols, row, v),
+                }
+            } else {
+                reference::round(state, w[t], reference::K[t])
+            };
+        }
+        final_states.push(state);
+    }
+    RoundTrace {
+        log_size,
+        cols,
+        final_states,
+    }
 }

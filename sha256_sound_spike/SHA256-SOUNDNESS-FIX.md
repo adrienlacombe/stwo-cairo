@@ -1,9 +1,21 @@
 # SHA-256 round AIR — Ch/Maj under-constraint: finding, fix, and proof
 
-**Status:** soundness-critical. Confirmed against `starkware-libs/stwo-cairo` PR #1425
-(branch `sha256-builtin`, HEAD `fc7d3ff7`) on both the prover Rust AIR and the Cairo
-verifier mirror. The fix here is **proven correct and sufficient** against this repo's
-current stwo pin (`5ea05973`).
+**Status:** soundness-critical. The bug and fix loci are confirmed **directly against**
+`starkware-libs/stwo-cairo` PR #1425 (branch `sha256-builtin`, HEAD `fc7d3ff7`): the missing
+binding constraints are absent from both the prover Rust round component
+(`.../components/sha_256_round.rs`) and the Cairo verifier mirror
+(`.../sha_256_round.cairo`), verified by reading those exact upstream files, and
+`pr1425-round-soundness-fix.patch` applies cleanly onto `fc7d3ff7` (`git apply --check`
+passes). The fix is **proven necessary and sufficient** — including an end-to-end digest
+forgery — against this repo's current stwo pin (`5ea05973`).
+
+Fidelity note: within `sha256_sound_spike/`, the round component's `evaluate` body and the
+bitwise-AND subroutine are decoded from PR #1425; the four supporting arithmetic subroutines
+(`triple_sum_32`, `verify_triple_sum_32`, `split_16_low_part_size_8`, `bitwise_xor_num_bits_8`)
+are re-expressed from vendored stwo-cairo (`fca831a`) and validated by the FIPS-180-4 KATs,
+not byte-diffed against PR #1425. The *bug and fix* do not depend on those subroutines — they
+are purely the four missing binding constraints in the round `evaluate`, which are confirmed
+absent upstream.
 
 **Disclosure guardrail:** PR #1425 is an *open, unmerged* upstream PR and this finding has
 **not** been disclosed to StarkWare. Nothing on this branch should be pushed to any public
@@ -88,21 +100,44 @@ Run:
 cd sha256_sound_spike && cargo test
 ```
 
-Acceptance gate (all green):
+Acceptance gate (all green, 12 tests):
 
 - `valid_single_compression_accepted` — FIPS-180-4 "abc", digest
   `ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad`.
 - `valid_two_compression_chain_accepted` — NIST 2-block message, digest
   `248d6a61 d20638b8 e5c02693 0c3e6039 a33ce459 64ff2167 f6ecedd4 19db06c1`.
-- `forged_ch_demonstrates_underconstraint_and_binding_fix` — builds a *consistent* Ch forgery
-  (arbitrary `ch_limb`, downstream row + interaction trace recomputed so all other constraints
-  still hold). With binding **off** (verbatim PR) the forgery is **ACCEPTED** — the hole.
-  With binding **on** (the fix) it is **REJECTED**, and the forged output differs from the
-  reference round output.
+- **`propagated_ch_forgery_accepted_without_binding_rejected_with`** — the **end-to-end
+  exploit**. Forge Ch at round 10, then carry the corrupted state honestly through rounds
+  11..63 so the round self-relation chains consistently across every row. Every row-local
+  constraint AND the round chain hold, so with binding **off** (verbatim PR) the component
+  **ACCEPTS** a trace whose final post-64-round state is not SHA-256 (a real digest forgery).
+  With binding **on** it is **REJECTED**, and the only violation is at the forged row.
+- `propagated_maj_forgery_accepted_without_binding_rejected_with` — the Maj counterpart,
+  proving the two `maj_limb` binding constraints are independently necessary.
+- `forged_ch_row_local_underconstraint_and_binding_fix` — the single-row demonstration.
+  **Scope caveat:** a single-row forgery leaves the round relation's push(row+1)/pull(row)
+  disagreeing at that boundary, so in the full multi-component AIR the round relation's global
+  balance would reject *this specific trace* even without the fix. It is the *propagated*
+  forgery above that the binding fix is genuinely required to stop. This is why the
+  end-to-end tests exist and why this one is labeled row-local.
 - `corrupted_chl_rejected`, `corrupted_new_e_rejected`, `corrupted_enabler_rejected`,
   `corrupted_and_byte_stale_interaction_rejected` — reject-path siblings.
 
-The `bind_ch_maj_limbs` flag on `Eval` exists only so the forgery test can instantiate the
+Why the propagated forgery survives the round relation (and needs the binding fix): the
+AND/XOR lookups pin `chl/chh` (resp. `majl/majh`) to the *correct* Ch/Maj of each row's
+inputs, but nothing ties the *consumed* `ch_limb/maj_limb` to them; a prover sets `ch_limb`
+to any value, recomputes that round's output from it, and carries the (wrong) state forward
+consistently. The round self-relation only checks that adjacent rounds chain — which they do —
+so it never fires. Only the binding constraint `ch_limb == chl` catches the substitution.
+
+Oracle scope: `check.rs` faithfully mirrors `assert_constraints_on_trace` at `5ea05973`
+(single-component), which verifies each row's algebraic constraints and that the logup
+telescopes to a `claimed_sum` recomputed from the trace. It does **not** model the global
+cross-component multiplicity balance of the full AIR — which is exactly why the propagated
+(chain-consistent) forgery is the faithful end-to-end model here, and the row-local one is
+flagged as caught-globally.
+
+The `bind_ch_maj_limbs` flag on `Eval` exists only so the forgery tests can instantiate the
 pre-fix variant; production construction sets it `true`.
 
 ## 4. Scope — what this branch is and is not

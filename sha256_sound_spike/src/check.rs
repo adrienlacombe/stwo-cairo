@@ -157,6 +157,13 @@ impl EvalAtRow for CheckEvaluator<'_> {
 
 /// Evaluate every constraint on every row; return all violations (empty = accepted).
 /// Non-panicking analogue of `assert_constraints_on_trace`.
+///
+/// Scope: unlike real stwo, this mirror does not enforce stwo's finalize-logup-exactly-once
+/// invariant (the `is_finalized` assert + `Drop` guard). An `evaluate` that forgot to
+/// finalize, or finalized twice, would be silently accepted here but panics under the real
+/// `AssertEvaluator`. The ported component finalizes exactly once (`finalize_logup_in_pairs`
+/// at the end of `evaluate`), so this does not affect any verdict; a future component reusing
+/// this checker must preserve that invariant itself.
 pub fn check_constraints_on_trace(
     evals: &TreeVec<Vec<&Vec<BaseField>>>,
     log_size: u32,
