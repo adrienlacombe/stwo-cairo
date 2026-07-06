@@ -21,4 +21,5 @@ pub mod check;
 pub mod components;
 pub mod reference;
 pub mod relations;
+pub mod symbolic;
 pub mod witness;
